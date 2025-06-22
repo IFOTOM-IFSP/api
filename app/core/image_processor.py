@@ -53,19 +53,6 @@ class SpectraProcessor:
             "dark_current_std_dev": noise_metrics.get('dark_current_std_dev', 0.0)
         }
 
-    def run_analysis(self, request: AnalysisRequest) -> AnalysisResult:
-        """
-        Executa a análise principal (quantitativa, varredura, etc.) usando referências pré-processadas.
-        Esta função corresponde ao endpoint /analyze.
-        """
-        logging.info(f"Iniciando análise do tipo: {request.analysisType}")
-        
-        if request.analysisType == 'quantitative' or request.analysisType == 'simple_read':
-            return self._process_quantitative_analysis(request)
-        elif request.analysisType == 'scan':
-            return self._process_scan_analysis(request)
-        else:
-            raise NotImplementedError(f"O tipo de análise '{request.analysisType}' ainda não foi implementado.")
 
 
     def _process_quantitative_analysis(self, request: AnalysisRequest) -> AnalysisResult:
