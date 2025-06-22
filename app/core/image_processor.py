@@ -123,11 +123,29 @@ class SpectraProcessor:
         equation_str = f"y = {slope:.4f}x + {intercept:.4f}"
         
         return {"r_squared": r_squared, "equation": equation_str, "slope": slope, "intercept": intercept}
-
-    def process(self) -> AnalysisResult:
-        """Orquestra todo o fluxo de processamento."""
-        logging.info("A iniciar o processamento de imagem...")
         
+    def _calculate_noise_metrics(self, dark_frames_base64: List[str]) -> NoiseMetrics:
+        if len(dark_frames_base64) < 2:
+            logging.warning("Apenas um frame de escuro fornecido. O cálculo de ruído requer pelo menos 2 frames.")
+            return NoiseMetrics(dark_current_std_dev=0.0)
+
+        logging.info(f"A calcular o ruído a partir de {len(dark_frames_base64)} frames de escuro...")
+        
+        dark_profiles = [self._convert_to_grayscale_profile(self._base64_to_image(frame_str)) for frame_str in dark_frames_base64]
+        
+        stacked_profiles = np.stack(dark_profiles, axis=0)
+        
+        std_dev_per_pixel = np.std(stacked_profiles, axis=0)
+        
+        average_std_dev = np.mean(std_dev_per_pixel)
+        
+        logging.info(f"Ruído (Desvio Padrão Médio do Sinal de Escuro): {average_std_dev:.4f}")
+        
+        return NoiseMetrics(dark_current_std_dev=float(average_std_dev))
+        
+    def process(self) -> AnalysisResult:
+        logging.info("A iniciar o processamento de imagem...")
+        noise_data = self._calculate_noise_metrics(self.data.dark_frames_base64)
         avg_dark_profile = self._get_averaged_profile(self.data.dark_frames_base64)
         avg_white_profile = self._get_averaged_profile(self.data.white_frames_base64)
 
@@ -173,4 +191,5 @@ class SpectraProcessor:
             calculated_concentration=calculated_concentration,
             sample_absorbance=float(sample_absorbance_value),
             spectrum_data=list(zip(wavelengths.tolist(), absorbance_values.tolist()))
+            noise_metrics=noise_data 
         )
