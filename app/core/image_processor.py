@@ -150,7 +150,68 @@ class SpectraProcessor:
             sample_results=[SampleResult(sample_absorbance=max_abs_value, spectrum_data=full_spectrum_data)]
         )
 
+     def run_analysis(self, request: AnalysisRequest) -> AnalysisResult:
+        """
+        Executa a análise principal, direcionando para o método correto com base no tipo de análise.
+        """
+        logging.info(f"Iniciando análise do tipo: {request.analysisType}")
+        
+        if request.analysisType == 'quantitative' or request.analysisType == 'simple_read':
+            return self._process_quantitative_analysis(request)
+        elif request.analysisType == 'scan':
+            return self._process_scan_analysis(request)
+        # --> MUDANÇA: Adicionado o direcionamento para a análise cinética.
+        elif request.analysisType == 'kinetic':
+            return self._process_kinetic_analysis(request)
+        else:
+            raise NotImplementedError(f"O tipo de análise '{request.analysisType}' ainda não foi implementado.")
 
+    # NOVO MÉTODO COMPLETO PARA ANÁLISE CINÉTICA
+    def _process_kinetic_analysis(self, request: AnalysisRequest) -> AnalysisResult:
+        """Processa uma análise cinética medindo a absorbância ao longo do tempo."""
+        # Validação da requisição
+        if not request.samples:
+            raise ValueError("Análise cinética requer uma amostra com frames.")
+        if not request.samples[0].timestamps_sec:
+            raise ValueError("Análise cinética requer timestamps para cada frame.")
+        if len(request.samples[0].frames_base64) != len(request.samples[0].timestamps_sec):
+            raise ValueError("O número de frames e de timestamps deve ser o mesmo.")
+        if not request.target_wavelength:
+            raise ValueError("Análise cinética requer um 'target_wavelength'.")
+
+        sample = request.samples[0]
+        logging.info(f"Processando análise cinética em {request.target_wavelength} nm...")
+
+        # Extrai os espectros de referência
+        avg_dark_profile = np.array([intensity for _, intensity in request.dark_reference_spectrum])
+        avg_white_profile = np.array([intensity for _, intensity in request.white_reference_spectrum])
+
+        kinetic_data_points = []
+        
+        # Itera sobre cada frame e seu respectivo timestamp
+        for frame_b64, timestamp in zip(sample.frames_base64, sample.timestamps_sec):
+            # Processamento de imagem para obter a absorbância
+            frame_image = self._base64_to_image(frame_b64)
+            frame_profile = self._convert_to_grayscale_profile(frame_image)
+            
+            absorbance_profile = self._compensate_spectrum(frame_profile, avg_dark_profile, avg_white_profile)
+            wavelengths, _ = self._apply_wavelength_calibration(absorbance_profile, request.pixel_to_wavelength_coeffs)
+            
+            # Obtém a absorbância no comprimento de onda alvo para este ponto no tempo
+            absorbance_at_t = self._get_absorbance_at_wavelength(wavelengths, absorbance_profile, request.target_wavelength)
+            
+            kinetic_data_points.append((timestamp, absorbance_at_t))
+        
+        logging.info("Análise cinética concluída.")
+        
+        # Empacota os resultados no modelo de resposta
+        sample_result = SampleResult(
+            kinetic_data=kinetic_data_points,
+            # Pode-se opcionalmente retornar a absorbância final como a principal
+            sample_absorbance=kinetic_data_points[-1][1] if kinetic_data_points else None
+        )
+        
+        return AnalysisResult(sample_results=[sample_result])
 
     def _base64_to_image(self, base64_string: str) -> np.ndarray:
         """Descodifica uma string base64 numa imagem OpenCV (BGR)."""
