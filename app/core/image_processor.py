@@ -31,38 +31,35 @@ class SpectraProcessor:
     # --------------------------------------------------------------------------
 
     def process_references(self, request: ReferenceProcessingRequest) -> Dict[str, Any]:
-        """
-        Processa as imagens de referência (escuro e branco) para gerar espectros médios.
-        Esta função corresponde ao endpoint /process-references.
-        """
-        logging.info("Iniciando o processamento de referências...")
+    """
+    Processa as imagens de referência (escuro e branco) para gerar espectros médios.
+    Esta função corresponde ao endpoint /process-references.
+    """
+    logging.info("Iniciando o processamento de referências...")
 
-        # Calcula o espectro médio do escuro e as métricas de ruído
-        dark_profiles = [self._convert_to_grayscale_profile(self._base64_to_image(frame)) for frame in request.dark_frames_base64]
-        avg_dark_profile = np.mean(dark_profiles, axis=0)
-        noise_metrics = self._calculate_noise_metrics(dark_profiles)
+    dark_profiles = [self._convert_to_grayscale_profile(self._base64_to_image(frame)) for frame in request.dark_frames_base64]
+    avg_dark_profile = np.mean(dark_profiles, axis=0)
+    noise_metrics = self._calculate_noise_metrics(dark_profiles)
 
-        # Calcula o espectro médio do branco
-        avg_white_profile = self._get_averaged_profile(request.white_frames_base64)
+    avg_white_profile = self._get_averaged_profile(request.white_frames_base64)
+    
+    # --- CORREÇÃO ESTÁ AQUI ---
+    # Agora, a calibração de comprimento de onda é sempre tentada.
+    # Usamos os comprimentos de onda fornecidos ou um valor padrão.
+    known_wavelengths = request.known_wavelengths_for_calibration or [465, 545] # Valor padrão
+    coeffs = self._calculate_wavelength_calibration_coeffs(
+        avg_white_profile, 
+        known_wavelengths
+    )
 
-        # Opcional: Calcula os coeficientes de calibração de comprimento de onda se necessário
-        coeffs = None
-        if request.known_wavelengths_for_calibration:
-            coeffs = self._calculate_wavelength_calibration_coeffs(
-                avg_white_profile,
-                request.known_wavelengths_for_calibration
-            )
-
-        logging.info("Processamento de referências concluído.")
-
-        # Retorna um dicionário que corresponde aos campos do modelo ReferenceProcessingResponse
-        return {
-            "dark_reference_spectrum": list(enumerate(avg_dark_profile.tolist())),
-            "white_reference_spectrum": list(enumerate(avg_white_profile.tolist())),
-            "pixel_to_wavelength_coeffs": coeffs,
-            "dark_current_std_dev": noise_metrics.get('dark_current_std_dev', 0.0)
-        }
-
+    logging.info("Processamento de referências concluído.")
+    
+    return {
+        "dark_reference_spectrum": list(enumerate(avg_dark_profile.tolist())),
+        "white_reference_spectrum": list(enumerate(avg_white_profile.tolist())),
+        "pixel_to_wavelength_coeffs": coeffs, # Este valor agora nunca será nulo
+        "dark_current_std_dev": noise_metrics.get('dark_current_std_dev', 0.0)
+    }
     def run_analysis(self, request: AnalysisRequest) -> AnalysisResult:
         """
         Executa a análise principal, direcionando para o método correto com base no tipo de análise.
