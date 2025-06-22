@@ -6,15 +6,20 @@ from typing import List, Literal, Optional, Tuple
 # --- 1. Modelos de Resposta  ---
 
 
+
 class CalibrationCurve(BaseModel):
     r_squared: float
     equation: str
+
+class NoiseMetrics(BaseModel):
+    dark_current_std_dev: float  #
 
 class AnalysisResult(BaseModel):
     calibration_curve: Optional[CalibrationCurve] = None
     calculated_concentration: Optional[float] = None
     sample_absorbance: Optional[float] = None
     spectrum_data: Optional[List[Tuple[float, float]]] = Field(None, example=[(400.5, 0.1), (401.0, 0.12)])
+    noise_metrics: Optional[NoiseMetrics] = None
 
 class AnalysisResponse(BaseModel):
     status: Literal['success', 'error']
