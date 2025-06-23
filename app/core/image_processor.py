@@ -1,4 +1,4 @@
-# Em: app/core/image_processor.py
+# app/core/image_processor.py
 
 import numpy as np
 import cv2
@@ -22,8 +22,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class SpectraProcessor:
     """
     Classe responsável por todo o processamento de imagens e cálculos espectrais.
-    Esta classe foi refatorada para ser 'stateless', ou seja, não armazena o estado de um pedido.
-    Cada método público executa uma tarefa específica com os dados que recebe.
     """
 
     # --------------------------------------------------------------------------
@@ -32,8 +30,7 @@ class SpectraProcessor:
 
     def process_references(self, request: ReferenceProcessingRequest) -> Dict[str, Any]:
         """
-        Processa as imagens de referência (escuro e branco) para gerar espectros médios.
-        Esta função corresponde ao endpoint /process-references.
+        Processa as imagens de referência para gerar espectros médios.
         """
         logging.info("Iniciando o processamento de referências...")
 
@@ -60,11 +57,11 @@ class SpectraProcessor:
 
     def run_analysis(self, request: AnalysisRequest) -> AnalysisResult:
         """
-        Executa a análise principal, direcionando para o método correto com base no tipo de análise.
+        Executa a análise principal com base no tipo de análise.
         """
         logging.info(f"Iniciando análise do tipo: {request.analysisType}")
 
-        if request.analysisType == 'quantitative' or request.analysisType == 'simple_read':
+        if request.analysisType in ['quantitative', 'simple_read']:
             return self._process_quantitative_analysis(request)
         elif request.analysisType == 'scan':
             return self._process_scan_analysis(request)
@@ -107,7 +104,7 @@ class SpectraProcessor:
                     slope = calibration_results['slope']
                     intercept = calibration_results['intercept']
                     read_concentration = (sample_absorbance - intercept) / slope
-                    calculated_concentration = read_concentration * sample.dilution_factor
+                    calculated_concentration = read_concentration * (sample.dilution_factor or 1.0)
 
                 sample_results_list.append(
                     SampleResult(
@@ -143,10 +140,8 @@ class SpectraProcessor:
 
     def _process_kinetic_analysis(self, request: AnalysisRequest) -> AnalysisResult:
         """Processa uma análise cinética medindo a absorbância ao longo do tempo."""
-        if not request.samples: raise ValueError("Análise cinética requer uma amostra com frames.")
-        if not request.samples[0].timestamps_sec: raise ValueError("Análise cinética requer timestamps para cada frame.")
-        if len(request.samples[0].frames_base64) != len(request.samples[0].timestamps_sec): raise ValueError("O número de frames e de timestamps deve ser o mesmo.")
-        if not request.target_wavelength: raise ValueError("Análise cinética requer um 'target_wavelength'.")
+        if not request.samples or not request.samples[0].timestamps_sec or len(request.samples[0].frames_base64) != len(request.samples[0].timestamps_sec) or not request.target_wavelength:
+            raise ValueError("Dados inválidos para análise cinética.")
 
         sample = request.samples[0]
         avg_dark_profile = np.array([intensity for _, intensity in request.dark_reference_spectrum])
@@ -154,8 +149,7 @@ class SpectraProcessor:
         kinetic_data_points = []
         
         for frame_b64, timestamp in zip(sample.frames_base64, sample.timestamps_sec):
-            frame_image = self._base64_to_image(frame_b64)
-            frame_profile = self._convert_to_grayscale_profile(frame_image)
+            frame_profile = self._convert_to_grayscale_profile(self._base64_to_image(frame_b64))
             absorbance_profile = self._compensate_spectrum(frame_profile, avg_dark_profile, avg_white_profile)
             wavelengths, _ = self._apply_wavelength_calibration(absorbance_profile, request.pixel_to_wavelength_coeffs)
             absorbance_at_t = self._get_absorbance_at_wavelength(wavelengths, absorbance_profile, request.target_wavelength)
@@ -173,8 +167,7 @@ class SpectraProcessor:
 
     def _base64_to_image(self, base64_string: str) -> np.ndarray:
         """
-        Descodifica uma string base64 numa imagem OpenCV (BGR) e a REDIMENSIONA
-        para um tamanho padrão para garantir consistência.
+        Descodifica e REDIMENSIONA a imagem para um tamanho padrão.
         """
         try:
             img_data = base64.b64decode(base64_string)
@@ -185,11 +178,10 @@ class SpectraProcessor:
             
             standard_size = (640, 480)
             resized_image = cv2.resize(image, standard_size)
-            
             return resized_image
             
         except Exception as e:
-            logging.error(f"Erro ao descodificar ou redimensionar base64: {e}", exc_info=True)
+            logging.error(f"Erro ao processar imagem base64: {e}", exc_info=True)
             raise
 
     def _convert_to_grayscale_profile(self, image: np.ndarray) -> np.ndarray:
@@ -204,19 +196,15 @@ class SpectraProcessor:
     def _compensate_spectrum(self, sample_profile, dark_profile, white_profile) -> np.ndarray:
         min_len = min(len(sample_profile), len(dark_profile), len(white_profile))
         sample, dark, white = sample_profile[:min_len], dark_profile[:min_len], white_profile[:min_len]
-
         denominator = white - dark
         denominator[denominator <= 1e-9] = 1e-9
-        
         transmittance = (sample - dark) / denominator
         transmittance = np.clip(transmittance, 1e-5, 1.0)
-        
-        absorbance = -np.log10(transmittance)
-        return absorbance
+        return -np.log10(transmittance)
 
     def _apply_wavelength_calibration(self, profile: np.ndarray, coeffs: List[float]) -> Tuple[np.ndarray, np.ndarray]:
-        if not coeffs:
-            raise ValueError("Coeficientes de calibração de comprimento de onda não fornecidos.")
+        if not coeffs or len(coeffs) != 3:
+            raise ValueError("Coeficientes de calibração de comprimento de onda inválidos ou não fornecidos.")
         pixels = np.arange(len(profile))
         a2, a1, a0 = coeffs
         wavelengths = a2 * (pixels ** 2) + a1 * pixels + a0
@@ -226,48 +214,30 @@ class SpectraProcessor:
         peak_height = np.mean(white_profile) * 1.1
         peak_distance = 50
         peaks, _ = find_peaks(white_profile, height=peak_height, distance=peak_distance)
-
         if len(peaks) < len(known_wavelengths):
-            raise ValueError(f"Não foram encontrados picos suficientes ({len(peaks)}) para os comprimentos de onda conhecidos ({len(known_wavelengths)}).")
+            raise ValueError(f"Picos insuficientes ({len(peaks)}) para os comprimentos de onda ({len(known_wavelengths)}).")
         
         pixel_positions = sorted(peaks)[:len(known_wavelengths)]
         coeffs = np.polyfit(pixel_positions, sorted(known_wavelengths), 2)
-        
         return coeffs.tolist()
         
     def _get_absorbance_at_wavelength(self, wavelengths: np.ndarray, absorbance_profile: np.ndarray, target_wavelength: float) -> float:
-        if target_wavelength is None:
-            return np.max(absorbance_profile)
-
+        if target_wavelength is None: return np.max(absorbance_profile)
         closest_index = np.argmin(np.abs(wavelengths - target_wavelength))
-        absorbance = absorbance_profile[closest_index]
-        return absorbance
+        return absorbance_profile[closest_index]
 
     def _perform_linear_regression(self, points: List[Tuple[float, float]]) -> Dict[str, Any]:
-        if len(points) < 2:
-            return {"r_squared": 0, "equation": "N/A", "slope": 0, "intercept": 0}
-
+        if len(points) < 2: return {"r_squared": 0, "equation": "N/A", "slope": 0, "intercept": 0}
         x = np.array([p[0] for p in points])
         y = np.array([p[1] for p in points])
         slope, intercept = np.polyfit(x, y, 1)
-        
-        if len(x) > 1 and len(y) > 1:
-            correlation_matrix = np.corrcoef(x, y)
-            correlation_xy = correlation_matrix[0,1]
-            r_squared = correlation_xy**2
-        else:
-            r_squared = 0.0
-        
+        correlation_matrix = np.corrcoef(x, y)
+        r_squared = correlation_matrix[0,1]**2
         equation_str = f"y = {slope:.4f}x {intercept:+.4f}"
-        
         return {"r_squared": r_squared, "equation": equation_str, "slope": slope, "intercept": intercept}
         
     def _calculate_noise_metrics(self, dark_profiles: List[np.ndarray]) -> Dict[str, float]:
-        if len(dark_profiles) < 2:
-            return {'dark_current_std_dev': 0.0}
+        if len(dark_profiles) < 2: return {'dark_current_std_dev': 0.0}
+        std_dev_per_pixel = np.std(np.stack(dark_profiles, axis=0), axis=0)
+        return {'dark_current_std_dev': float(np.mean(std_dev_per_pixel))}
 
-        stacked_profiles = np.stack(dark_profiles, axis=0)
-        std_dev_per_pixel = np.std(stacked_profiles, axis=0)
-        average_std_dev = np.mean(std_dev_per_pixel)
-        
-        return {'dark_current_std_dev': float(average_std_dev)}
