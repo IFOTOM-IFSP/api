@@ -184,17 +184,30 @@ class SpectraProcessor:
     # 3. MÉTODOS PRIVADOS AUXILIARES (Lógica de baixo nível reutilizada)
     # --------------------------------------------------------------------------
 
-    def _base64_to_image(self, base64_string: str) -> np.ndarray:
-        """Descodifica uma string base64 numa imagem OpenCV (BGR)."""
+     def _base64_to_image(self, base64_string: str) -> np.ndarray:
+        """
+        Descodifica uma string base64 numa imagem OpenCV (BGR) e a REDIMENSIONA
+        para um tamanho padrão para garantir consistência.
+        """
         try:
             img_data = base64.b64decode(base64_string)
             img_array = np.frombuffer(img_data, dtype=np.uint8)
             image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            if image is None: raise ValueError("A string base64 não é uma imagem válida.")
-            return image
+            if image is None: 
+                raise ValueError("A string base64 não é uma imagem válida.")
+            
+            # --- CORREÇÃO CRÍTICA ADICIONADA AQUI ---
+            # Redimensiona todas as imagens para um tamanho fixo (ex: 640x480).
+            # Isso garante que todos os perfis de intensidade terão o mesmo comprimento.
+            standard_size = (640, 480) # (largura, altura)
+            resized_image = cv2.resize(image, standard_size)
+            
+            return resized_image
+            
         except Exception as e:
-            logging.error(f"Erro ao descodificar base64: {e}", exc_info=True)
+            logging.error(f"Erro ao descodificar ou redimensionar base64: {e}", exc_info=True)
             raise
+
 
     def _convert_to_grayscale_profile(self, image: np.ndarray) -> np.ndarray:
         """Converte uma imagem para escala de cinza e extrai o perfil de intensidade médio."""
