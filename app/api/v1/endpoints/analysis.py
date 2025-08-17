@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Dependsimport logging 
+from fastapi import APIRouter, HTTPException, Dependsimport
+import logging 
 from app.api.v1.models import (
     AnalysisRequest,
     AnalysisResponse,
