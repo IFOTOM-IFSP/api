@@ -59,22 +59,39 @@ class SpectraProcessor:
     def _profile_from_request_data(self, spectrum_data: List[Tuple[int, float]]) -> np.ndarray:
         return np.array([intensity for _, intensity in spectrum_data])
 
+
     def _process_quantitative_analysis(self, request: AnalysisRequest) -> AnalysisResult:
         avg_dark_profile = self._profile_from_request_data(request.dark_reference_spectrum)
         avg_white_profile = self._profile_from_request_data(request.white_reference_spectrum)
-        
-        standard_points = []
-        for sample in request.samples:
-            if sample.type == 'standard':
-                avg_standard_profile = self._get_averaged_profile(sample.frames_base64)
-                absorbance_profile = self._compensate_spectrum(avg_standard_profile, avg_dark_profile, avg_white_profile)
-                wavelengths, _ = self._apply_wavelength_calibration(absorbance_profile, request.pixel_to_wavelength_coeffs)
-                peak_absorbance = self._get_absorbance_at_wavelength(wavelengths, absorbance_profile, request.target_wavelength)
-                if sample.concentration is not None:
-                    standard_points.append((sample.concentration, peak_absorbance))
 
-        calibration_results = self._perform_linear_regression(standard_points) if standard_points else None
-        
+        calibration_results_dict = None
+        newly_created_curve_model = None  # <-- Usaremos esta variável para o retorno condicional
+
+
+        if request.calibration_curve:
+            logging.info("Usando parâmetros de curva de calibração fornecidos pelo cliente.")
+            calibration_results_dict = {
+                "slope": request.calibration_curve.slope,
+                "intercept": request.calibration_curve.intercept,
+            }
+
+        else:
+            logging.info("Gerando curva de calibração em tempo real a partir de padrões.")
+            standard_points = []
+            for sample in request.samples:
+                if sample.type == 'standard':
+                    avg_standard_profile = self._get_averaged_profile(sample.frames_base64)
+                    absorbance_profile = self._compensate_spectrum(avg_standard_profile, avg_dark_profile, avg_white_profile)
+                    wavelengths, _ = self._apply_wavelength_calibration(absorbance_profile, request.pixel_to_wavelength_coeffs)
+                    peak_absorbance = self._get_absorbance_at_wavelength(wavelengths, absorbance_profile, request.target_wavelength)
+                    if sample.concentration is not None:
+                        standard_points.append((sample.concentration, peak_absorbance))
+
+            if standard_points:
+                calibration_results_dict = self._perform_linear_regression(standard_points)
+                newly_created_curve_model = CalibrationCurve(**calibration_results_dict)
+
+
         sample_results_list = []
         for sample in request.samples:
             if sample.type == 'unknown':
@@ -82,11 +99,12 @@ class SpectraProcessor:
                 absorbance_profile = self._compensate_spectrum(avg_sample_profile, avg_dark_profile, avg_white_profile)
                 wavelengths, _ = self._apply_wavelength_calibration(absorbance_profile, request.pixel_to_wavelength_coeffs)
                 sample_absorbance = self._get_absorbance_at_wavelength(wavelengths, absorbance_profile, request.target_wavelength)
-                
+
                 calculated_concentration = None
-                if calibration_results and calibration_results['slope'] != 0:
-                    slope = calibration_results['slope']
-                    intercept = calibration_results['intercept']
+                # ANOTAÇÃO: Usamos 'calibration_results_dict', que é preenchido em AMBOS os cenários.
+                if calibration_results_dict and calibration_results_dict.get('slope') != 0:
+                    slope = calibration_results_dict['slope']
+                    intercept = calibration_results_dict['intercept']
                     read_concentration = (sample_absorbance - intercept) / slope
                     calculated_concentration = read_concentration * (sample.dilution_factor or 1.0)
 
@@ -97,9 +115,9 @@ class SpectraProcessor:
                         spectrum_data=list(zip(wavelengths.tolist(), absorbance_profile.tolist()))
                     )
                 )
-        
+
         return AnalysisResult(
-            calibration_curve=CalibrationCurve(**calibration_results) if calibration_results else None,
+            calibration_curve=newly_created_curve_model,
             sample_results=sample_results_list
         )
 

@@ -12,10 +12,13 @@ class SampleFrame(BaseModel):
 
     timestamps_sec: Optional[List[float]] = Field(None, description="Lista de timestamps em segundos para cada frame, para análise cinética.")
 
+class CalibrationCurveInput(BaseModel):
+    slope: float
+    intercept: float
 
 class AnalysisRequest(BaseModel):
     analysisType: Literal['quantitative', 'scan', 'simple_read', 'kinetic']
-    
+    calibration_curve: Optional[CalibrationCurveInput] = Field(None, description="Parâmetros (slope, intercept) de uma curva de calibração existente.")
     dark_reference_spectrum: List[Tuple[int, float]]
     white_reference_spectrum: List[Tuple[int, float]]
     pixel_to_wavelength_coeffs: List[float]
@@ -25,7 +28,19 @@ class AnalysisRequest(BaseModel):
     target_wavelength: Optional[float] = Field(None, description="Comprimento de onda alvo para 'quantitative', 'simple_read' e 'kinetic'")
     scan_range: Optional[Tuple[float, float]] = Field(None, description="Intervalo (início, fim) em nm para 'scan'")
     optical_path_cm: float = Field(1.0, description="Caminho óptico da cubeta em cm")
+    @model_validator(mode='after')
+    def check_calibration_method(self) -> 'AnalysisRequest':
+        has_existing_curve = self.calibration_curve is not None
+        has_standard_samples = any(s.type == 'standard' for s in self.samples)
 
+        if self.analysisType == 'quantitative':
+            if has_existing_curve and has_standard_samples:
+                raise ValueError("Forneça os parâmetros de 'calibration_curve' OU amostras 'standard', mas não ambos.")
+            
+            if not has_existing_curve and not has_standard_samples:
+                raise ValueError("Análise quantitativa requer os parâmetros de 'calibration_curve' ou amostras 'standard'.")
+                
+        return self
 
 class ReferenceProcessingRequest(BaseModel):
     dark_frames_base64: List[str]
@@ -66,3 +81,4 @@ class ReferenceProcessingResponse(BaseModel):
     pixel_to_wavelength_coeffs: Optional[List[float]] = None
     dark_current_std_dev: Optional[float] = None
     error: Optional[str] = None
+
