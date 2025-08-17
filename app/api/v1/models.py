@@ -1,6 +1,5 @@
-from pydantic import BaseModel, Field
 from typing import List, Literal, Optional, Tuple
-
+from pydantic import BaseModel, Field, model_validator
 
 class SampleFrame(BaseModel):
     type: Literal['standard', 'unknown']
