@@ -1,5 +1,3 @@
-# app/core/image_processor.py
-
 import numpy as np
 import cv2
 import base64
@@ -7,7 +5,6 @@ import logging
 from typing import List, Tuple, Dict, Any
 from scipy.signal import find_peaks
 
-# Importando os modelos Pydantic para type hinting claro
 from app.api.v1.models import (
     AnalysisRequest,
     AnalysisResult,
@@ -16,22 +13,11 @@ from app.api.v1.models import (
     SampleResult
 )
 
-# Configuração do logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class SpectraProcessor:
-    """
-    Classe responsável por todo o processamento de imagens e cálculos espectrais.
-    """
-
-    # --------------------------------------------------------------------------
-    # 1. MÉTODOS PÚBLICOS (Chamados pelos Endpoints)
-    # --------------------------------------------------------------------------
 
     def process_references(self, request: ReferenceProcessingRequest) -> Dict[str, Any]:
-        """
-        Processa as imagens de referência para gerar espectros médios.
-        """
         logging.info("Iniciando o processamento de referências...")
 
         dark_profiles = [self._convert_to_grayscale_profile(self._base64_to_image(frame)) for frame in request.dark_frames_base64]
@@ -43,7 +29,9 @@ class SpectraProcessor:
         known_wavelengths = request.known_wavelengths_for_calibration or [465, 545]
         coeffs = self._calculate_wavelength_calibration_coeffs(
             avg_white_profile, 
-            known_wavelengths
+            known_wavelengths,
+            height_factor=request.peak_detection_height_factor, 
+            distance=request.peak_detection_distance
         )
 
         logging.info("Processamento de referências concluído.")
@@ -56,9 +44,7 @@ class SpectraProcessor:
         }
 
     def run_analysis(self, request: AnalysisRequest) -> AnalysisResult:
-        """
-        Executa a análise principal com base no tipo de análise.
-        """
+
         logging.info(f"Iniciando análise do tipo: {request.analysisType}")
 
         if request.analysisType in ['quantitative', 'simple_read']:
@@ -70,14 +56,12 @@ class SpectraProcessor:
         else:
             raise NotImplementedError(f"O tipo de análise '{request.analysisType}' ainda não foi implementado.")
 
-    # --------------------------------------------------------------------------
-    # 2. LÓGICA DE PROCESSAMENTO POR TIPO DE ANÁLISE
-    # --------------------------------------------------------------------------
+    def _profile_from_request_data(self, spectrum_data: List[Tuple[int, float]]) -> np.ndarray:
+        return np.array([intensity for _, intensity in spectrum_data])
 
     def _process_quantitative_analysis(self, request: AnalysisRequest) -> AnalysisResult:
-        """Processa uma análise quantitativa ou uma leitura simples."""
-        avg_dark_profile = np.array([intensity for _, intensity in request.dark_reference_spectrum])
-        avg_white_profile = np.array([intensity for _, intensity in request.white_reference_spectrum])
+        avg_dark_profile = self._profile_from_request_data(request.dark_reference_spectrum)
+        avg_white_profile = self._profile_from_request_data(request.white_reference_spectrum)
         
         standard_points = []
         for sample in request.samples:
@@ -120,13 +104,12 @@ class SpectraProcessor:
         )
 
     def _process_scan_analysis(self, request: AnalysisRequest) -> AnalysisResult:
-        """Processa uma análise de varredura de comprimento de onda."""
         if not request.samples or request.samples[0].type != 'unknown':
             raise ValueError("A análise de varredura requer uma amostra do tipo 'unknown'.")
 
         sample = request.samples[0]
-        avg_dark_profile = np.array([intensity for _, intensity in request.dark_reference_spectrum])
-        avg_white_profile = np.array([intensity for _, intensity in request.white_reference_spectrum])
+        avg_dark_profile = self._profile_from_request_data(request.dark_reference_spectrum)
+        avg_white_profile = self._profile_from_request_data(request.white_reference_spectrum)
         avg_sample_profile = self._get_averaged_profile(sample.frames_base64)
         absorbance_profile = self._compensate_spectrum(avg_sample_profile, avg_dark_profile, avg_white_profile)
         wavelengths, _ = self._apply_wavelength_calibration(absorbance_profile, request.pixel_to_wavelength_coeffs)
@@ -139,13 +122,12 @@ class SpectraProcessor:
         )
 
     def _process_kinetic_analysis(self, request: AnalysisRequest) -> AnalysisResult:
-        """Processa uma análise cinética medindo a absorbância ao longo do tempo."""
         if not request.samples or not request.samples[0].timestamps_sec or len(request.samples[0].frames_base64) != len(request.samples[0].timestamps_sec) or not request.target_wavelength:
             raise ValueError("Dados inválidos para análise cinética.")
 
         sample = request.samples[0]
-        avg_dark_profile = np.array([intensity for _, intensity in request.dark_reference_spectrum])
-        avg_white_profile = np.array([intensity for _, intensity in request.white_reference_spectrum])
+        avg_dark_profile = self._profile_from_request_data(request.dark_reference_spectrum)
+        avg_white_profile = self._profile_from_request_data(request.white_reference_spectrum)
         kinetic_data_points = []
         
         for frame_b64, timestamp in zip(sample.frames_base64, sample.timestamps_sec):
@@ -161,14 +143,7 @@ class SpectraProcessor:
         )
         return AnalysisResult(sample_results=[sample_result])
 
-    # --------------------------------------------------------------------------
-    # 3. MÉTODOS PRIVADOS AUXILIARES
-    # --------------------------------------------------------------------------
-
     def _base64_to_image(self, base64_string: str) -> np.ndarray:
-        """
-        Descodifica e REDIMENSIONA a imagem para um tamanho padrão.
-        """
         try:
             img_data = base64.b64decode(base64_string)
             img_array = np.frombuffer(img_data, dtype=np.uint8)
@@ -210,9 +185,9 @@ class SpectraProcessor:
         wavelengths = a2 * (pixels ** 2) + a1 * pixels + a0
         return wavelengths, profile
         
-    def _calculate_wavelength_calibration_coeffs(self, white_profile: np.ndarray, known_wavelengths: List[float]) -> List[float]:
-        peak_height = np.mean(white_profile) * 1.1
-        peak_distance = 50
+    def _calculate_wavelength_calibration_coeffs(self, white_profile: np.ndarray, known_wavelengths: List[float], height_factor: float, distance: int) -> List[float]:
+        peak_height = np.mean(white_profile) * height_factor 
+        peak_distance = distance                             
         peaks, _ = find_peaks(white_profile, height=peak_height, distance=peak_distance)
         if len(peaks) < len(known_wavelengths):
             raise ValueError(f"Picos insuficientes ({len(peaks)}) para os comprimentos de onda ({len(known_wavelengths)}).")
