@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Dependsimport
+from fastapi import APIRouter, HTTPException, Depends
 import logging 
 from app.api.v1.models import (
     AnalysisRequest,
