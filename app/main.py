@@ -1,22 +1,21 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1.endpoints import analysis
 
-app = FastAPI(title="iFOTOM Analysis API", version="1.0.0")
+from app.api.v1.endpoints.analysis import router as analysis_router
 
+app = FastAPI(title="Spectrophotometry Analysis API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(analysis_router, prefix="/api/v1")
 
-app.include_router(analysis.router, prefix="/api/v1", tags=["Analysis"])
 
-@app.get("/")
-def read_root():
-    """Endpoint raiz para uma verificação de saúde rápida."""
-    return {"status": "iFOTOM Analysis API v1 is running"}
+@app.get("/health")
+def health():
+    return {"status": "ok"}

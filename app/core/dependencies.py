@@ -1,6 +1,6 @@
+from functools import lru_cache
 from app.core.image_processor import SpectraProcessor
 
-spectra_processor = SpectraProcessor()
-
-def get_spectra_processor():
-    return spectra_processor
+@lru_cache(maxsize=1)
+def get_spectra_processor() -> SpectraProcessor:
+    return SpectraProcessor()

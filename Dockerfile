@@ -1,16 +1,17 @@
-FROM python:3.9-slim
+FROM python:3.12-slim
 
-WORKDIR /code
+WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 \
+  && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y libgl1 libglib2.0-0
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY ./requirements.txt /code/requirements.txt
-
-RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
-
-COPY ./app /code/app
+COPY app ./app
 
 EXPOSE 10000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "10000"]
+# Prod: gunicorn + uvicorn worker
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "--bind", "0.0.0.0:10000", "--workers", "2", "--timeout", "90"]

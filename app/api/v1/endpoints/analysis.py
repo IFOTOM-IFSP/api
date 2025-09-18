@@ -1,47 +1,46 @@
+# app/api/v1/endpoints/analysis.py
 from fastapi import APIRouter, HTTPException, Depends
-import logging 
+import logging
 from app.api.v1.models import (
-    AnalysisRequest,
-    AnalysisResponse,
-    ReferenceProcessingRequest,
-    ReferenceProcessingResponse
+    AnalysisRequest, AnalysisResponse,
+    ReferenceProcessingRequest, ReferenceProcessingResponse
 )
-from app.core.image_processor import SpectraProcessor 
+from app.core.image_processor import SpectraProcessor
 from app.core.dependencies import get_spectra_processor
 
 router = APIRouter()
 
-@router.post("/process-references", response_model=ReferenceProcessingResponse, summary="Processa e retorna espectros de referência")
-async def process_references_endpoint(request: ReferenceProcessingRequest, processor: SpectraProcessor = Depends(get_spectra_processor)):
+@router.post("/process-references",
+             response_model=ReferenceProcessingResponse,
+             summary="Processa dark/white e retorna espectros e métricas de ruído")
+async def process_references_endpoint(
+    request: ReferenceProcessingRequest,
+    processor: SpectraProcessor = Depends(get_spectra_processor)
+):
     try:
-        processed_data = processor.process_references(request)
-        return ReferenceProcessingResponse(status="success", **processed_data)
-
-    except Exception as e:
-        print(f"ERRO NO PROCESSAMENTO DE REFERÊNCIAS: {e}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Erro interno do servidor ao processar referências: {e}"
-        )
-
-@router.post("/analyze", response_model=AnalysisResponse, summary="Analisa amostras usando referências processadas")
-async def analyze_endpoint(request: AnalysisRequest, processor: SpectraProcessor = Depends(get_spectra_processor)):
-
-    try:
-        analysis_results = processor.run_analysis(request)
-
-        return AnalysisResponse(status="success", results=analysis_results)
-
+        return processor.process_references(request)
     except ValueError as ve:
-        logging.warning(f"Requisição com dados inválidos: {ve}")
-        raise HTTPException(
-            status_code=400, 
-            detail=str(ve)   
-        )
-
+        logging.warning(f"Dados inválidos: {ve}")
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        logging.error(f"Erro inesperado no servidor: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500, 
-            detail="Ocorreu um erro interno. A equipe foi notificada."
-        )
+        logging.exception("Erro inesperado")
+        raise HTTPException(status_code=500, detail="Erro interno")
+
+@router.post("/analyze",
+             response_model=AnalysisResponse,
+             summary="Executa análise quantitativa/scan/kinetic")
+async def analyze_endpoint(
+    request: AnalysisRequest,
+    processor: SpectraProcessor = Depends(get_spectra_processor)
+):
+    try:
+        result = processor.run_analysis(request)
+        return AnalysisResponse(status="success", results=result)
+    except ValueError as ve:
+        logging.warning(f"Dados inválidos: {ve}")
+        raise HTTPException(status_code=400, detail=str(ve))
+    except NotImplementedError as nie:
+        raise HTTPException(status_code=501, detail=str(nie))
+    except Exception as e:
+        logging.exception("Erro inesperado")
+        raise HTTPException(status_code=500, detail="Erro interno")
