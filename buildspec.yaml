@@ -1,0 +1,34 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-east-1         # use a mesma região do ECR/App Runner
+    ECR_REPO: ifotom-api                  # nome do repositório no ECR
+    IMAGE_TAG: latest
+
+phases:
+  pre_build:
+    commands:
+      - echo "Login no ECR..."
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URI=${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+      - aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${ECR_URI}
+      - COMMIT_SHA=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-7)
+      - IMAGE_TAG_SHA=${COMMIT_SHA:-latest}
+  build:
+    commands:
+      - echo "Build da imagem em $(date)"
+      - docker build -t ${ECR_REPO}:${IMAGE_TAG_SHA} -t ${ECR_REPO}:${IMAGE_TAG} .
+  post_build:
+    commands:
+      - echo "Tag & push para o ECR"
+      - docker tag ${ECR_REPO}:${IMAGE_TAG_SHA} ${ECR_URI}/${ECR_REPO}:${IMAGE_TAG_SHA}
+      - docker tag ${ECR_REPO}:${IMAGE_TAG} ${ECR_URI}/${ECR_REPO}:${IMAGE_TAG}
+      - docker push ${ECR_URI}/${ECR_REPO}:${IMAGE_TAG_SHA}
+      - docker push ${ECR_URI}/${ECR_REPO}:${IMAGE_TAG}
+      # opcional: arquivo de saída com a URI, útil pra pipelines
+      - printf '{"imageUri":"%s"}' ${ECR_URI}/${ECR_REPO}:${IMAGE_TAG_SHA} > imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json
