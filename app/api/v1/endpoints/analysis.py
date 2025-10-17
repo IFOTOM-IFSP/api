@@ -1,46 +1,50 @@
-# app/api/v1/endpoints/analysis.py
-from fastapi import APIRouter, HTTPException, Depends
-import logging
-from app.api.v1.models import (
-    AnalysisRequest, AnalysisResponse,
-    ReferenceProcessingRequest, ReferenceProcessingResponse
+# app/routes.py
+from fastapi import APIRouter
+from .schemas import (
+    CharacterizeRequest, CharacterizeResponse,
+    QuantAnalyzeRequest, QuantAnalyzeResponse
 )
-from app.core.image_processor import SpectraProcessor
-from app.core.dependencies import get_spectra_processor
 
 router = APIRouter()
 
-@router.post("/process-references",
-             response_model=ReferenceProcessingResponse,
-             summary="Processa dark/white e retorna espectros e métricas de ruído")
-async def process_references_endpoint(
-    request: ReferenceProcessingRequest,
-    processor: SpectraProcessor = Depends(get_spectra_processor)
-):
-    try:
-        return processor.process_references(request)
-    except ValueError as ve:
-        logging.warning(f"Dados inválidos: {ve}")
-        raise HTTPException(status_code=400, detail=str(ve))
-    except Exception as e:
-        logging.exception("Erro inesperado")
-        raise HTTPException(status_code=500, detail="Erro interno")
+# --- Handlers "core" (use seus serviços reais aqui) ---
+def process_references_core(req: CharacterizeRequest) -> CharacterizeResponse:
+    # TODO: chamar o seu pipeline real
+    return CharacterizeResponse(
+        status="success",
+        dark_reference_spectrum=[[0, 99.0]],
+        white_reference_spectrum=[[0, 199.0]],
+        dark_current_std_dev=1.2,
+        pixel_to_nm=None
+    )
 
-@router.post("/analyze",
-             response_model=AnalysisResponse,
-             summary="Executa análise quantitativa/scan/kinetic")
-async def analyze_endpoint(
-    request: AnalysisRequest,
-    processor: SpectraProcessor = Depends(get_spectra_processor)
-):
-    try:
-        result = processor.run_analysis(request)
-        return AnalysisResponse(status="success", results=result)
-    except ValueError as ve:
-        logging.warning(f"Dados inválidos: {ve}")
-        raise HTTPException(status_code=400, detail=str(ve))
-    except NotImplementedError as nie:
-        raise HTTPException(status_code=501, detail=str(nie))
-    except Exception as e:
-        logging.exception("Erro inesperado")
-        raise HTTPException(status_code=500, detail="Erro interno")
+def analyze_core(req: QuantAnalyzeRequest) -> QuantAnalyzeResponse:
+    # TODO: chamar seu motor real (quant, etc.)
+    return QuantAnalyzeResponse(
+        status="success",
+        results={
+            "curve": req.curve.model_dump() if req.curve else None,
+            "sample_results": [
+                {"sample_absorbance": 0.452, "calculated_concentration": 37.58}
+            ],
+            "qa": {"notes": "ok"}
+        }
+    )
+
+# --- Rotas compatíveis com seu app ---
+@router.post("/instrument/characterize", response_model=CharacterizeResponse)
+def instrument_characterize(req: CharacterizeRequest):
+    return process_references_core(req)
+
+@router.post("/quant/analyze", response_model=QuantAnalyzeResponse)
+def quant_analyze(req: QuantAnalyzeRequest):
+    return analyze_core(req)
+
+# --- Rotas antigas preservadas (retrocompat) ---
+@router.post("/api/v1/process-references", response_model=CharacterizeResponse)
+def legacy_process_references(req: CharacterizeRequest):
+    return process_references_core(req)
+
+@router.post("/api/v1/analyze", response_model=QuantAnalyzeResponse)
+def legacy_analyze(req: QuantAnalyzeRequest):
+    return analyze_core(req)
