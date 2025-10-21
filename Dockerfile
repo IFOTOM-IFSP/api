@@ -21,4 +21,4 @@ COPY . .
 
 # Comando de início que usa a variável $PORT fornecida pelo Cloud Run
 # Assumindo que seu main.py está em app/main.py, o alvo deve ser "app.main:app"
-CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "--bind", "0.0.0.0:$PORT"]
+CMD gunicorn -w 4 -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT
