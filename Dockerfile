@@ -14,4 +14,4 @@ COPY app ./app
 EXPOSE 10000
 
 # Prod: gunicorn + uvicorn worker
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "--bind", "0.0.0.0:10000", "--workers", "2", "--timeout", "90"]
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "main:app", "--bind", "0.0.0.0:$PORT"]
