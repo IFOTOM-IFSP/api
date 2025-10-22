@@ -1,179 +1,193 @@
-from __future__ import annotations
-import base64
-import numpy as np
-import cv2
-from typing import List, Tuple, Optional
 
-from app.api.v1.models import (
-    ReferenceProcessingRequest, ReferenceProcessingResponse,
-    AnalysisRequest, AnalysisResult, SampleResult, ROI
+from __future__ import annotations
+from typing import List, Optional
+import numpy as np
+from math import log
+
+from scipy.optimize import curve_fit
+
+from .models import (
+    ROI,
+    PixelToNm,
+    Curve,
+    ReferenceBurst,
+    KineticAnalyzeRequest,
+    KineticAnalyzeResponse,
 )
 
 
+
+def _exp1(t, Ainf, A0, k):
+    # A(t) = Ainf + (A0 - Ainf) * exp(-k t)
+    return Ainf + (A0 - Ainf) * np.exp(-k * t)
+
+
+def _as_1d(y):
+    """Aceita [[i, val], ...] ou [val, val, ...] e retorna np.ndarray 1D de valores."""
+    arr = np.asarray(y)
+    if arr.ndim == 2 and arr.shape[1] >= 2:
+        return arr[:, 1].astype(float)
+    return arr.astype(float)
+
+
 class SpectraProcessor:
+    """Core de espectros para IFOTOM.
+    Implementa cinética A(t) em λ fixo.
     """
-    Núcleo da API. Mantém tudo stateless: cada chamada traz dados brutos e devolve resultados.
-    """
 
-    def _base64_to_image(self, base64_string: str) -> np.ndarray:
-        img_data = base64.b64decode(base64_string)
-        img_array = np.frombuffer(img_data, dtype=np.uint8)
-        image = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)  # já em Y (luma)
-        if image is None:
-            raise ValueError("Frame base64 inválido")
-        return image
+    def _get_burst_mean_vector(self, burst: ReferenceBurst, roi: Optional[ROI]) -> np.ndarray:
+        """Retorna a média dos vetores do burst.
+        Aqui assumimos que os vetores já são espectros 1D pós-ROI. Se quiser aplicar ROI em imagem,
+        esse passo deve ocorrer antes (no gerador do vetor).
+        """
+        vectors = [np.asarray(v, dtype=float) for v in burst.vectors]
+        if not vectors:
+            raise ValueError("Burst sem vetores")
+        # Checar tamanhos coerentes
+        L = min(v.shape[0] for v in vectors)
+        stack = np.vstack([v[:L] for v in vectors])
+        return stack.mean(axis=0)
 
-    def _profile_from_image(self, image: np.ndarray, roi: Optional[ROI]) -> np.ndarray:
-        if roi:
-            x, y, w, h = roi.x, roi.y, roi.w, roi.h
-            image = image[y:y+h, x:x+w]
-        prof = image.sum(axis=0).astype(np.float64)
-        return prof
-
-    def _robust_mean_vectors(self, vectors: List[List[float]]) -> np.ndarray:
-        arr = np.asarray(vectors, dtype=np.float64)  # [frames, numPx]
-        if arr.ndim != 2:
-            raise ValueError("vectors deve ser 2D [frames, numPixels]")
-        return np.median(arr, axis=0)
-
-    def _avg_profile_from_base64_burst(self, frames_b64: List[str], roi: Optional[ROI]) -> np.ndarray:
-        profiles = [self._profile_from_image(self._base64_to_image(b64), roi) for b64 in frames_b64]
-        return np.median(np.stack(profiles, axis=0), axis=0)
-
-    def _compensate_spectrum(self, sample: np.ndarray, dark: np.ndarray, white: np.ndarray) -> np.ndarray:
-        L = int(min(len(sample), len(dark), len(white)))
-        s = np.clip(sample[:L] - dark[:L], 0, None)
-        r = np.clip(white[:L] - dark[:L], 1e-9, None)
-        T = s / r
-        T = np.clip(T, 1e-6, 1.0)
+    def _compensate_spectrum(self, raw: np.ndarray, dark: np.ndarray, white: np.ndarray) -> np.ndarray:
+        """Compensa dark/white e devolve absorbância A = -log10(T)."""
+        eps = 1e-6
+        denom = np.clip(white - dark, eps, None)
+        T = np.clip((raw - dark) / denom, eps, 1.0)
         A = -np.log10(T)
         return A
 
     def _px_to_nm(self, length: int, coeffs: List[float]) -> np.ndarray:
-        px = np.arange(length, dtype=np.float64)
-        coeffs_polyval = list(reversed(coeffs))
-        return np.polyval(coeffs_polyval, px)
+        p = np.arange(length, dtype=float)
+        a0 = coeffs[0] if len(coeffs) > 0 else 0.0
+        a1 = coeffs[1] if len(coeffs) > 1 else 1.0
+        a2 = coeffs[2] if len(coeffs) > 2 else 0.0
+        return a0 + a1 * p + a2 * (p ** 2)
 
     def _abs_at_lambda(self, wavelengths: np.ndarray, A: np.ndarray, lambda0: float, window_nm: float) -> float:
-        mask = (wavelengths >= lambda0 - window_nm) & (wavelengths <= lambda0 + window_nm)
+        if wavelengths is None:
+            # Sem calibração: usa pixel mais próximo de lambda0 como índice bruto
+            idx = int(round(lambda0))
+            idx = max(0, min(idx, len(A) - 1))
+            return float(A[idx])
+        mask = np.abs(wavelengths - lambda0) <= (window_nm / 2.0)
         if not np.any(mask):
-            raise ValueError("Janela espectral vazia para o λ alvo")
-        return float(np.mean(A[mask]))
+            # fallback: ponto mais próximo
+            idx = int(np.argmin(np.abs(wavelengths - lambda0)))
+            return float(A[idx])
+        return float(A[mask].mean())
 
-    def process_references(self, request: ReferenceProcessingRequest) -> ReferenceProcessingResponse:
-        if hasattr(request.dark, "vectors"):
-            dark_vec = self._robust_mean_vectors(request.dark.vectors)
-            dark_std = float(np.std(np.asarray(request.dark.vectors), axis=0).mean())
-        else:
-            dark_vec = self._avg_profile_from_base64_burst(request.dark.frames_base64, request.roi)
-            dark_std = float(np.std(dark_vec))
 
-        if hasattr(request.white, "vectors"):
-            white_vec = self._robust_mean_vectors(request.white.vectors)
-        else:
-            white_vec = self._avg_profile_from_base64_burst(request.white.frames_base64, request.roi)
-
-        L = int(min(len(dark_vec), len(white_vec)))
-        dark_vec = dark_vec[:L]
-        white_vec = white_vec[:L]
-
-        dark_pairs = list(zip(range(L), dark_vec.tolist()))
-        white_pairs = list(zip(range(L), white_vec.tolist()))
-
-        return ReferenceProcessingResponse(
-            status="success",
-            dark_reference_spectrum=dark_pairs,
-            white_reference_spectrum=white_pairs,
-            dark_current_std_dev=dark_std,
-            pixel_to_wavelength=None,
-        )
-
-    def run_analysis(self, request: AnalysisRequest) -> AnalysisResult:
-        atype = request.analysisType
-
-        dark_px, dark_I = zip(*request.dark_reference_spectrum)
-        white_px, white_I = zip(*request.white_reference_spectrum)
-        dark = np.asarray(dark_I, dtype=np.float64)
-        white = np.asarray(white_I, dtype=np.float64)
-        L = int(min(len(dark), len(white)))
-        dark, white = dark[:L], white[:L]
-
-        wavelengths = np.arange(L, dtype=np.float64)
-        if request.pixel_to_wavelength:
-            wavelengths = self._px_to_nm(L, request.pixel_to_wavelength.coeffs)
-
-        if atype == "quantitative" or atype == "simple_read":
-            return self._analyze_quantitative_like(request, dark, white, wavelengths)
-        elif atype == "scan":
-            return self._analyze_scan(request, dark, white, wavelengths)
-        elif atype == "kinetic":
-            # implementar no futuro (variação temporal)
-            raise NotImplementedError("Kinetic ainda não implementado.")
-        else:
-            raise ValueError(f"analysisType inválido: {atype}")
-
-    def _get_burst_mean_vector(self, burst, roi: Optional[ROI]) -> np.ndarray:
-        if hasattr(burst, "vectors"):
-            return self._robust_mean_vectors(burst.vectors)
-        else:
-            return self._avg_profile_from_base64_burst(burst.frames_base64, roi)
-
-    def _analyze_quantitative_like(
+    def _analyze_kinetic(
         self,
-        request: AnalysisRequest,
-        dark: np.ndarray,
-        white: np.ndarray,
-        wavelengths: np.ndarray
-    ) -> AnalysisResult:
-        if request.target_wavelength is None:
-            raise ValueError("Para quantitative/simple_read informe target_wavelength (nm).")
+        request: KineticAnalyzeRequest,
+    ) -> dict:
+        # Preparar referências
+        dark = _as_1d(request.dark_reference_spectrum)
+        white = _as_1d(request.white_reference_spectrum)
 
-        sample_results: List[SampleResult] = []
-        for s in request.samples:
-            vec = self._get_burst_mean_vector(s.burst, request.roi)[:len(dark)]
+        # Calcular comprimentos de onda (se houver pixel_to_nm)
+        wavelengths = None
+        L = len(dark)
+        if request.pixel_to_nm is not None:
+            coeffs = [request.pixel_to_nm.a0, request.pixel_to_nm.a1, request.pixel_to_nm.a2]
+            wavelengths = self._px_to_nm(L, coeffs)
+
+        # Extrair A(t) em λ alvo
+        t_vals: List[float] = []
+        A_vals: List[float] = []
+        for tp in request.series:
+            vec = self._get_burst_mean_vector(tp.burst, request.roi)[:L]
             A = self._compensate_spectrum(vec, dark, white)
-
             A0 = self._abs_at_lambda(wavelengths, A, request.target_wavelength, request.window_nm)
+            t_vals.append(float(tp.t_sec))
+            A_vals.append(float(A0))
 
-            C = None
-            if request.calibration_curve and request.calibration_curve.slope != 0:
-                C = (A0 - request.calibration_curve.intercept) / request.calibration_curve.slope
-                C *= s.dilution_factor if s.dilution_factor else 1.0
+        t = np.asarray(t_vals, dtype=float)
+        A_t = np.asarray(A_vals, dtype=float)
 
-            sample_results.append(
-                SampleResult(
-                    sample_absorbance=A0,
-                    calculated_concentration=C,
-                    spectrum_data=list(zip(wavelengths.tolist(), A.tolist()))
-                )
-            )
+        # Ordenar por tempo (precaução)
+        order = np.argsort(t)
+        t = t[order]
+        A_t = A_t[order]
 
-        return AnalysisResult(
-            calibration_curve=None,
-            sample_results=sample_results,
-            qa={"notes": "ok"}
+        # Ajuste
+        spec = request.fit or KineticFitSpec()
+        model = spec.model
+        A_fit = np.full_like(A_t, np.nan)
+        meta = {}
+
+        if model == "first_order":
+            # Estimativas iniciais
+            if spec.baseline_strategy == "tail_median":
+                n_tail = max(3, int(len(t) * spec.tail_fraction))
+                Ainf0 = float(np.median(A_t[-n_tail:])) if len(t) >= 3 else float(A_t[-1])
+            else:
+                Ainf0 = float(min(A_t.min(), A_t[-1]))
+            A00 = float(A_t[0])
+            # Chute para k baseado no espaçamento médio de tempo
+            dt = float(np.mean(np.diff(t))) if len(t) > 1 else 1.0
+            k0 = 0.1 / max(dt, 1e-6)
+            p0 = (Ainf0, A00, k0)
+
+            try:
+                popt, pcov = curve_fit(_exp1, t, A_t, p0=p0, maxfev=20000)
+                Ainf, A0, k = map(float, popt)
+                A_fit = _exp1(t, *popt)
+                ss_res = float(np.sum((A_t - A_fit) ** 2))
+                ss_tot = float(np.sum((A_t - np.mean(A_t)) ** 2)) + 1e-12
+                R2 = 1.0 - ss_res / ss_tot
+                # IC95 de k
+                try:
+                    se_k = float(np.sqrt(max(pcov[2, 2], 0.0)))
+                    k_ci = [k - 1.96 * se_k, k + 1.96 * se_k]
+                except Exception:
+                    k_ci = [None, None]
+                meta.update(dict(k=k, k_ci95=k_ci, t_half=float(np.log(2) / k) if k > 0 else None, R2=R2, A0=A0, Ainf=Ainf))
+            except Exception as e:
+                meta.update(dict(error=f"fit_failed: {e}"))
+
+        elif model == "second_order":
+            # Linearização simples em 1/A ~ t (só didática; o correto é 1/C)
+            y = 1.0 / np.clip(A_t, 1e-6, None)
+            x = t
+            M = np.vstack([x, np.ones_like(x)]).T
+            m, b = np.linalg.lstsq(M, y, rcond=None)[0]
+            yhat = m * x + b
+            ss_res = float(np.sum((y - yhat) ** 2))
+            ss_tot = float(np.sum((y - np.mean(y)) ** 2)) + 1e-12
+            R2 = 1.0 - ss_res / ss_tot
+            meta.update(dict(k=float(m), k_ci95=None, t_half=None, R2=R2))
+            A_fit = 1.0 / np.clip(yhat, 1e-6, None)
+
+        else:  # "none"
+            meta.update(dict(k=None, k_ci95=None, t_half=None, R2=None))
+            A_fit = A_t.copy()
+
+        residuals = (A_t - A_fit).tolist()
+
+        results = dict(
+            meta=dict(
+                lambda_nm=request.target_wavelength,
+                window_nm=request.window_nm,
+                delta_t_mean_s=float(np.mean(np.diff(t))) if len(t) > 1 else None,
+                n_timepoints=len(t),
+            ) | meta,
+            series=dict(
+                t_sec=t.tolist(),
+                A=A_t.tolist(),
+                A_fit=A_fit.tolist(),
+                residuals=residuals,
+            ),
+            stack=None,
+            qa=dict(notes="ok", monotonicity_warn=False, saturation_warn=False, drift_warn=False),
         )
 
-    def _analyze_scan(
-        self,
-        request: AnalysisRequest,
-        dark: np.ndarray,
-        white: np.ndarray,
-        wavelengths: np.ndarray
-    ) -> AnalysisResult:
-        sample_results: List[SampleResult] = []
-        for s in request.samples:
-            vec = self._get_burst_mean_vector(s.burst, request.roi)[:len(dark)]
-            A = self._compensate_spectrum(vec, dark, white)
-            sample_results.append(
-                SampleResult(
-                    sample_absorbance=float(np.max(A)),
-                    calculated_concentration=None,
-                    spectrum_data=list(zip(wavelengths.tolist(), A.tolist()))
-                )
-            )
-        return AnalysisResult(
-            calibration_curve=None,
-            sample_results=sample_results,
-            qa={"notes": "scan"}
-        )
+        return results
+
+
+    def run_kinetic(self, request: KineticAnalyzeRequest) -> KineticAnalyzeResponse:
+        try:
+            results = self._analyze_kinetic(request)
+            return KineticAnalyzeResponse(status="success", results=results)
+        except Exception as e:
+            return KineticAnalyzeResponse(status="error", error=str(e))
