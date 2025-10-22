@@ -1,6 +1,10 @@
-# app/schemas.py
+from __future__ import annotations
 from typing import List, Optional, Literal
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import BaseModel, Field, ConfigDict
+
+# =====================
+#   Tipos básicos
+# =====================
 
 class ROI(BaseModel):
     x: int
@@ -9,81 +13,102 @@ class ROI(BaseModel):
     h: int
 
 class PixelToNm(BaseModel):
+    """Coeficientes do polinômio pixel→nm: λ = a0 + a1·p + a2·p²
+    a2 pode ser 0.0 para ajuste linear.
+    """
     a0: float
     a1: float
-    a2: Optional[float] = None
-    rmse_nm: Optional[float] = None
-
-    model_config = ConfigDict(extra="allow")
-
-    @model_validator(mode="before")
-    def accept_legacy_coeffs(cls, v):
-        # aceita {"coeffs":[a0,a1,a2?], "rmse_nm":...}
-        if isinstance(v, dict) and "coeffs" in v and ("a0" not in v and "a1" not in v):
-            coeffs = v.get("coeffs") or []
-            return {
-                "a0": coeffs[0] if len(coeffs) > 0 else None,
-                "a1": coeffs[1] if len(coeffs) > 1 else None,
-                "a2": coeffs[2] if len(coeffs) > 2 else None,
-                "rmse_nm": v.get("rmse_nm"),
-            }
-        return v
+    a2: float = 0.0
 
 class Curve(BaseModel):
+    """Curva de calibração A = m·C + b"""
     m: float
     b: float
-    R2: Optional[float] = Field(None, description="coeficiente de determinação")
-
-    model_config = ConfigDict(extra="allow")
-
-    @model_validator(mode="before")
-    def accept_legacy_curve(cls, v):
-        # aceita {slope, intercept, r_squared}
-        if isinstance(v, dict) and "m" not in v and "b" not in v:
-            return {
-                "m": v.get("slope"),
-                "b": v.get("intercept"),
-                "R2": v.get("r_squared") or v.get("R2"),
-            }
-        return v
 
 class ReferenceBurst(BaseModel):
+    """Conjunto de espectros 1D (pós-ROI, já colapsados por coluna).
+    Cada item em `vectors` é um espectro de uma aquisição.
+    """
     vectors: List[List[float]]
 
-class SampleBurst(BaseModel):
-    kind: Literal["unknown","standard","blank"] = "unknown"
+# =====================
+#   Cinética A(t)
+# =====================
+
+class TimePoint(BaseModel):
+    t_sec: float
     burst: ReferenceBurst
 
-class CharacterizeRequest(BaseModel):
-    dark: ReferenceBurst
-    white: ReferenceBurst
-    roi: Optional[ROI] = None
+class KineticFitSpec(BaseModel):
+    model: Literal["first_order", "second_order", "none"] = "first_order"
+    baseline_strategy: Literal["tail_median", "fit_param"] = "tail_median"
+    tail_fraction: float = 0.2
 
-class CharacterizeResponse(BaseModel):
-    status: Literal["success"]
-    dark_reference_spectrum: List[List[float]]
-    white_reference_spectrum: List[List[float]]
-    dark_current_std_dev: float
-    pixel_to_nm: Optional[PixelToNm] = None  # responder já no novo nome
+class KineticAnalyzeRequest(BaseModel):
+    """Payload para análise cinética A(t) em λ fixo.
+    - dark/white: espectros de referência (mesmo comprimento dos vetores das séries)
+    - series: lista de pontos no tempo com bursts.
+    - pixel_to_nm: opcional (alias `pixel_to_wavelength` aceito para retrocompat).
+    """
+    analysisType: Literal["kinetic"] = "kinetic"
 
-class QuantAnalyzeRequest(BaseModel):
-    analysisType: Literal["quantitative","simple_read","scan","kinetic"] = "quantitative"
     pixel_to_nm: Optional[PixelToNm] = Field(None, alias="pixel_to_wavelength")
-    curve: Optional[Curve] = Field(None, alias="calibration_curve")
     target_wavelength: float
     window_nm: float = 4.0
     roi: Optional[ROI] = None
+
     dark_reference_spectrum: List[List[float]]
     white_reference_spectrum: List[List[float]]
-    samples: List[SampleBurst]
+
+    series: List[TimePoint]
+    fit: Optional[KineticFitSpec] = None
 
     model_config = ConfigDict(populate_by_name=True)
 
-class SampleResult(BaseModel):
-    sample_absorbance: float
-    calculated_concentration: Optional[float] = None
-    spectrum_data: Optional[List[List[float]]] = None
+class KineticAnalyzeResponse(BaseModel):
+    status: Literal["success", "error"]
+    results: Optional[dict] = None
+    error: Optional[str] = None
+
+# =====================
+#   Outros (existentes / retrocompat)
+# =====================
+
+class CharacterizeRequest(BaseModel):
+    # MVP simples (mantenha/expanda conforme o seu fluxo de caracterização)
+    pass
+
+class CharacterizeResponse(BaseModel):
+    status: Literal["success", "error"] = "success"
+    dark_reference_spectrum: Optional[List[List[float]]] = None
+    white_reference_spectrum: Optional[List[List[float]]] = None
+    dark_current_std_dev: Optional[float] = None
+    pixel_to_nm: Optional[PixelToNm] = None
+
+class QuantAnalyzeRequest(BaseModel):
+    """Mantido aqui para compatibilidade com sua rota /quant/analyze.
+    Caso você já tenha outro shape no seu projeto, mantenha o seu e ignore este.
+    """
+    analysisType: Literal["quantitative", "simple_read", "scan", "kinetic"]
+    pixel_to_nm: Optional[PixelToNm] = Field(None, alias="pixel_to_wavelength")
+    roi: Optional[ROI] = None
+
+    # Referências
+    dark_reference_spectrum: Optional[List[List[float]]] = None
+    white_reference_spectrum: Optional[List[List[float]]] = None
+
+    # Dados para leitura simples/quant (ex.: um burst só)
+    burst: Optional[ReferenceBurst] = None
+
+    # Curva (para quantitative)
+    curve: Optional[Curve] = None
+
+    target_wavelength: Optional[float] = None
+    window_nm: Optional[float] = 4.0
+
+    model_config = ConfigDict(populate_by_name=True)
 
 class QuantAnalyzeResponse(BaseModel):
-    status: Literal["success"]
-    results: dict
+    status: Literal["success", "error"]
+    results: Optional[dict] = None
+    error: Optional[str] = None
