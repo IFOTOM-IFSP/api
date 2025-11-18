@@ -93,7 +93,132 @@ class SpectraProcessor:
             idx = int(np.argmin(np.abs(wavelengths - lambda0)))
             return float(A[idx])
         return float(A[mask].mean())
+        
+    def _find_peak_pixel(
+        self,
+        intensities: np.ndarray,
+        dark: np.ndarray,
+        window: int = 5,
+    ) -> float:
+        """
+        Subtrai dark, encontra o pixel de maior intensidade e calcula
+        o centroide numa janela em torno do pico.
+        """
+        corrected = intensities - dark
+        corrected[corrected < 0] = 0
 
+        p_max = int(np.argmax(corrected))
+        start = max(p_max - window, 0)
+        end = min(p_max + window + 1, len(corrected))
+
+        x = np.arange(start, end)
+        y = corrected[start:end]
+
+        if y.sum() <= 0:
+            return float(p_max)
+
+        p_centroid = float((x * y).sum() / y.sum())
+        return p_centroid
+
+    def _characterize_instrument(
+        self,
+        request: CharacterizeRequest,
+    ) -> dict:
+        dark_vecs = [np.asarray(v, dtype=float) for v in request.dark_burst.vectors]
+        if not dark_vecs:
+            raise ValueError("dark_burst sem vetores")
+
+        L = min(v.shape[0] for v in dark_vecs)
+        dark_stack = np.vstack([v[:L] for v in dark_vecs])
+        dark_mean = dark_stack.mean(axis=0)
+        dark_std = dark_stack.std(axis=0, ddof=1) if dark_stack.shape[0] > 1 else np.zeros_like(dark_mean)
+        dark_std_global = float(dark_std.mean())
+
+        dark_ref = [[int(i), float(val)] for i, val in enumerate(dark_mean.tolist())]
+
+        white_ref = None
+        if request.white_burst is not None:
+            white_vecs = [np.asarray(v, dtype=float) for v in request.white_burst.vectors]
+            if white_vecs:
+                Lw = min(v.shape[0] for v in white_vecs)
+                white_stack = np.vstack([v[:Lw] for v in white_vecs])
+                white_mean = white_stack.mean(axis=0)
+                white_ref = [[int(i), float(val)] for i, val in enumerate(white_mean.tolist())]
+            else:
+                white_mean = None
+        else:
+            white_mean = None
+
+        if not request.lasers or len(request.lasers) < 2:
+            raise ValueError("É necessário fornecer pelo menos 2 lasers para calibração.")
+
+        lasers_sorted: List[LaserCalibBurst] = sorted(request.lasers, key=lambda L: L.lambda_nm)
+
+        laser_low = lasers_sorted[0]
+        laser_high = lasers_sorted[-1]
+
+        dark_for_laser = dark_mean
+
+        def mean_vec_from_burst(burst: ReferenceBurst) -> np.ndarray:
+            vecs = [np.asarray(v, dtype=float) for v in burst.vectors]
+            if not vecs:
+                raise ValueError("Burst de laser sem vetores")
+            Lb = min(v.shape[0] for v in vecs)
+            stack = np.vstack([v[:Lb] for v in vecs])
+            return stack.mean(axis=0)
+
+        spec_low = mean_vec_from_burst(laser_low.burst)
+        spec_high = mean_vec_from_burst(laser_high.burst)
+
+        pg = self._find_peak_pixel(spec_low, dark_for_laser)
+        ph = self._find_peak_pixel(spec_high, dark_for_laser)
+
+        lambda_low = float(laser_low.lambda_nm)
+        lambda_high = float(laser_high.lambda_nm)
+
+        if ph == pg:
+            raise ValueError("Picos de laser caíram no mesmo pixel; verifique o arranjo óptico.")
+
+        a1 = (lambda_high - lambda_low) / (ph - pg)
+        a0 = lambda_low - a1 * pg
+        a2 = 0.0
+
+        pixel_to_nm = PixelToNm(a0=a0, a1=a1, a2=a2)
+
+        results = dict(
+            dark_reference_spectrum=dark_ref,
+            white_reference_spectrum=white_ref,
+            dark_current_std_dev=dark_std_global,
+            pixel_to_nm=pixel_to_nm,
+            meta=dict(
+                device_id=request.device_id,
+                lasers_used=[
+                    dict(tag=laser_low.tag, lambda_nm=lambda_low, pixel_peak=pg),
+                    dict(tag=laser_high.tag, lambda_nm=lambda_high, pixel_peak=ph),
+                ],
+            ),
+        )
+        return results
+
+    def run_characterize(self, request: CharacterizeRequest) -> CharacterizeResponse:
+        try:
+            res = self._characterize_instrument(request)
+            return CharacterizeResponse(
+                status="success",
+                dark_reference_spectrum=res["dark_reference_spectrum"],
+                white_reference_spectrum=res["white_reference_spectrum"],
+                dark_current_std_dev=res["dark_current_std_dev"],
+                pixel_to_nm=res["pixel_to_nm"],
+            )
+        except Exception as e:
+            return CharacterizeResponse(
+                status="error",
+                dark_reference_spectrum=[],
+                white_reference_spectrum=None,
+                dark_current_std_dev=0.0,
+                pixel_to_nm=None,
+                error=str(e),
+            )
 
     def _analyze_quantitative(
         self,
@@ -136,7 +261,6 @@ class SpectraProcessor:
         A_sd = float(A_arr.std(ddof=1)) if len(A_arr) > 1 else 0.0
         A_cv = float(A_sd / A_mean * 100.0) if A_mean != 0 else None
 
-        # Curva de calibração: A = m*C + b
         m = float(request.curve.m)
         b = float(request.curve.b)
         if m == 0:
