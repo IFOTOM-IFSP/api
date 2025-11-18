@@ -1,6 +1,5 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
-
 
 class ROI(BaseModel):
     x0: int
@@ -35,7 +34,7 @@ class CharacterizeRequest(BaseModel):
     dark_burst: ReferenceBurst
     white_burst: Optional[ReferenceBurst] = None
     lasers: List[LaserCalibBurst]   
-    metadata: dict = {}
+    metadata: dict = Field(default_factory=dict)
 
 
 class CharacterizeResponse(BaseModel):
