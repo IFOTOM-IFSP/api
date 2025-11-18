@@ -24,6 +24,27 @@ class Curve(BaseModel):
 class ReferenceBurst(BaseModel):
     vectors: List[List[float]]
 
+class LaserCalibBurst(BaseModel):
+    tag: str              
+    lambda_nm: float      
+    burst: ReferenceBurst
+
+class CharacterizeRequest(BaseModel):
+    device_id: str
+    roi: Optional[ROI] = None
+    dark_burst: ReferenceBurst
+    white_burst: Optional[ReferenceBurst] = None
+    lasers: List[LaserCalibBurst]   
+    metadata: dict = {}
+
+
+class CharacterizeResponse(BaseModel):
+    status: str
+    dark_reference_spectrum: List[List[float]]      
+    white_reference_spectrum: Optional[List[List[float]]] = None
+    dark_current_std_dev: float
+    pixel_to_nm: Optional[PixelToNm] = None
+    error: Optional[str] = None
 
 class QuantAnalyzeRequest(BaseModel):
     dark_reference_spectrum: List[float] | List[List[float]]
